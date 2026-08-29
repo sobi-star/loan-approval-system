@@ -111,8 +111,9 @@ def get_history_from_api() -> pd.DataFrame:
         history_df = pd.DataFrame(records)
 
         if "Approval_Probability" in history_df.columns:
+            # FIXED: Handle case where Approval_Probability might already be a float or string safely
             history_df["Approval_Probability"] = (
-                history_df["Approval_Probability"] * 100
+                pd.to_numeric(history_df["Approval_Probability"], errors="coerce") * 100
             ).round(2).astype(str) + "%"
 
         return history_df
@@ -221,9 +222,9 @@ else:
         )
         loan_amount = st.number_input(
             "Loan Amount",
-            min_value=1,
-            value=150,
-            step=10,
+            min_value=1.0, # FIXED: Ensure float minimum for number inputs where applicable
+            value=150.0,
+            step=10.0,
         )
         loan_term = st.selectbox(
             "Loan Amount Term (months)",
@@ -255,11 +256,11 @@ else:
 
     if submitted:
         payload = {
-            "ApplicantIncome": applicant_income,
-            "CoapplicantIncome": coapplicant_income,
-            "LoanAmount": loan_amount,
-            "Loan_Amount_Term": loan_term,
-            "Credit_History": credit_history,
+            "ApplicantIncome": float(applicant_income),
+            "CoapplicantIncome": float(coapplicant_income),
+            "LoanAmount": float(loan_amount),
+            "Loan_Amount_Term": int(loan_term),
+            "Credit_History": float(credit_history),
             "Gender": gender,
             "Married": married,
             "Dependents": dependents,
@@ -309,8 +310,8 @@ else:
             )
 
             st.success(
-                f"Prediction saved successfully. Record ID: {result['id']} "
-                f"| {result['timestamp']}"
+                f"Prediction saved successfully. Record ID: {result.get('id', 'N/A')} "
+                f"| {result.get('timestamp', '')}"
             )
 
             with st.expander("View submitted application"):
