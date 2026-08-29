@@ -126,12 +126,10 @@ def signup(user_data: UserRegister):
     try:
         supabase = get_supabase()
         
-        # Check if user exists
         existing_user = supabase.table("users").select("id").eq("username", user_data.username).execute()
         if existing_user.data:
             raise HTTPException(status_code=400, detail="Username already exists.")
 
-        # Hash password and insert
         hashed_pwd = get_password_hash(user_data.password)
         res = supabase.table("users").insert({
             "username": user_data.username,
@@ -208,7 +206,10 @@ def predict(application: LoanApplication, current_user: dict = Depends(get_curre
             "timestamp": timestamp
         }).execute()
 
-        record_id = res.data[0]["id"] if res.data else None
+        # FIXED: Safely retrieve the newly inserted row ID regardless of supabase-py response version behavior
+        record_id = None
+        if res.data and len(res.data) > 0:
+            record_id = res.data[0].get("id")
 
         return {
             "id": record_id,
@@ -247,5 +248,5 @@ def history(current_user: dict = Depends(get_current_user)):
             })
 
         return {"count": len(formatted_records), "records": formatted_records}
-    except Exception as exc:
+    posts_exc = except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Could not fetch history: {exc}")
