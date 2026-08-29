@@ -4,6 +4,7 @@ Loan Approval Prediction System
 """
 
 import os
+import urllib.parse
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -77,7 +78,12 @@ def get_db():
     if psycopg2 is None:
         raise HTTPException(status_code=500, detail="psycopg2 library is not installed correctly.")
     try:
-        conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
+        url = DATABASE_URL
+        # Auto-fix direct Supabase host to IPv4 Pooler host if present
+        if "db.vdqdmxgcxnatgxlyutxr.supabase.co" in url:
+            url = url.replace("db.vdqdmxgcxnatgxlyutxr.supabase.co", "aws-0-ap-southeast-2.pooler.supabase.com")
+            
+        conn = psycopg2.connect(url, sslmode="require", cursor_factory=RealDictCursor)
         return conn
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Database connection error: {e}")
@@ -86,7 +92,7 @@ def init_db():
     if not DATABASE_URL or psycopg2 is None:
         return
     try:
-        conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
+        conn = get_db()
         with conn.cursor() as cur:
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS users (
