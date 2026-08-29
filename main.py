@@ -1,10 +1,9 @@
 """
-main.py - FastAPI Backend with PostgreSQL (Supabase) & JWT Auth
+main.py - FastAPI Backend with Supabase & JWT Auth
 Loan Approval Prediction System
 """
 
 import os
-import urllib.parse
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -27,7 +26,8 @@ except ImportError:
 BASE_DIR = Path(__file__).resolve().parent
 MODEL_PATH = BASE_DIR / "model.pkl"
 
-DATABASE_URL = os.environ.get("DATABASE_URL")
+# Direct URL with URL-encoded password (! encoded as %21)
+DB_URL = "postgresql://postgres.vdqdmxgcxnatgxlyutxr:DcdpTbKAy4%21?t9y@aws-0-ap-southeast-2.pooler.supabase.com:5432/postgres"
 SECRET_KEY = os.environ.get("JWT_SECRET_KEY", "super-secret-key-change-this-in-prod")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24
@@ -73,26 +73,19 @@ class LoanApplication(BaseModel):
 
 # ---------- Database Helpers ----------
 def get_db():
-    if not DATABASE_URL:
-        raise HTTPException(status_code=500, detail="DATABASE_URL environment variable is missing.")
     if psycopg2 is None:
         raise HTTPException(status_code=500, detail="psycopg2 library is not installed correctly.")
     try:
-        url = DATABASE_URL
-        # Auto-fix direct Supabase host to IPv4 Pooler host if present
-        if "db.vdqdmxgcxnatgxlyutxr.supabase.co" in url:
-            url = url.replace("db.vdqdmxgcxnatgxlyutxr.supabase.co", "aws-0-ap-southeast-2.pooler.supabase.com")
-            
-        conn = psycopg2.connect(url, sslmode="require", cursor_factory=RealDictCursor)
+        conn = psycopg2.connect(DB_URL, sslmode="require", cursor_factory=RealDictCursor)
         return conn
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Database connection error: {e}")
+        raise HTTPException(status_code=500, detail=f"Database connection error: {str(e)}")
 
 def init_db():
-    if not DATABASE_URL or psycopg2 is None:
+    if psycopg2 is None:
         return
     try:
-        conn = get_db()
+        conn = psycopg2.connect(DB_URL, sslmode="require", cursor_factory=RealDictCursor)
         with conn.cursor() as cur:
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS users (
