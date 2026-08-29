@@ -1,5 +1,5 @@
 """
-main.py - FastAPI Backend with Supabase & JWT Auth
+main.py - FastAPI Backend with Supabase REST Client & Auth
 Loan Approval Prediction System
 """
 
@@ -15,20 +15,15 @@ import pandas as pd
 from pydantic import BaseModel, Field
 from passlib.context import CryptContext
 from jose import JWTError, jwt
-
-# Safe Import for PostgreSQL Driver
-try:
-    import psycopg2
-    from psycopg2.extras import RealDictCursor
-except ImportError:
-    psycopg2 = None
-    RealDictCursor = None
+from supabase import create_client, Client
 
 BASE_DIR = Path(__file__).resolve().parent
 MODEL_PATH = BASE_DIR / "model.pkl"
 
-# Direct URL with URL-encoded password (! encoded as %21)
-DB_URL = "postgresql://postgres.vdqdmxgcxnatgxlyutxr:DcdpTbKAy4%21?t9y@aws-0-ap-southeast-2.pooler.supabase.com:5432/postgres"
+# Supabase Credentials (Direct HTTPS REST API - Serverless Safe)
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://vdqdmxgcxnatgxlyutxr.supabase.co")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZkcWRteGdjeG5hdGd4bHl1dHhyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDA1NjQ5MzcsImV4cCI6MjA1NjE0MDkzN30.YOUR_SUPABASE_KEY_HERE")
+
 SECRET_KEY = os.environ.get("JWT_SECRET_KEY", "super-secret-key-change-this-in-prod")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24
@@ -36,7 +31,6 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 
-# Single FastAPI instance definition with CORS
 app = FastAPI(title="Loan Approval API with Auth & Supabase")
 
 app.add_middleware(
@@ -46,6 +40,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ---------- Supabase Client Setup ----------
+def get_supabase() -> Client:
+    return create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # ---------- Model Loading ----------
 try:
@@ -81,59 +79,6 @@ class LoanApplication(BaseModel):
     Self_Employed: str
     Property_Area: str
 
-# ---------- Database Helpers ----------
-def get_db():
-    if psycopg2 is None:
-        raise HTTPException(status_code=500, detail="psycopg2 library is not installed correctly.")
-    try:
-        conn = psycopg2.connect(DB_URL, sslmode="require", cursor_factory=RealDictCursor)
-        return conn
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Database connection error: {str(e)}")
-
-def init_db():
-    if psycopg2 is None:
-        return
-    try:
-        conn = psycopg2.connect(DB_URL, sslmode="require", cursor_factory=RealDictCursor)
-        with conn.cursor() as cur:
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS users (
-                    id SERIAL PRIMARY KEY,
-                    username VARCHAR(100) UNIQUE NOT NULL,
-                    password_hash TEXT NOT NULL,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                );
-            """)
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS predictions_history (
-                    id SERIAL PRIMARY KEY,
-                    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
-                    applicant_income REAL NOT NULL,
-                    coapplicant_income REAL NOT NULL,
-                    loan_amount REAL NOT NULL,
-                    loan_amount_term INTEGER NOT NULL,
-                    credit_history REAL NOT NULL,
-                    gender VARCHAR(20) NOT NULL,
-                    married VARCHAR(20) NOT NULL,
-                    dependents VARCHAR(20) NOT NULL,
-                    education VARCHAR(20) NOT NULL,
-                    self_employed VARCHAR(20) NOT NULL,
-                    property_area VARCHAR(20) NOT NULL,
-                    prediction VARCHAR(20) NOT NULL,
-                    probability REAL NOT NULL,
-                    timestamp VARCHAR(50) NOT NULL
-                );
-            """)
-            conn.commit()
-        conn.close()
-    except Exception as e:
-        print(f"DB Init Warning: {e}")
-
-@app.on_event("startup")
-def startup():
-    init_db()
-
 # ---------- Auth Utilities ----------
 def verify_password(plain_password, hashed_password):
     return pwd_context.verify(plain_password, hashed_password)
@@ -161,20 +106,16 @@ def get_current_user(token: str = Depends(oauth2_scheme)):
     except JWTError:
         raise credentials_exception
 
-    conn = get_db()
-    with conn.cursor() as cur:
-        cur.execute("SELECT * FROM users WHERE username = %s;", (username,))
-        user = cur.fetchone()
-    conn.close()
-
-    if user is None:
+    supabase = get_supabase()
+    res = supabase.table("users").select("*").eq("username", username).execute()
+    if not res.data:
         raise credentials_exception
-    return user
+    return res.data[0]
 
 # ---------- Endpoints ----------
 @app.get("/")
 def root():
-    return {"message": "Loan Approval API with Supabase & Auth is running"}
+    return {"message": "Loan Approval API with Supabase REST is running"}
 
 @app.get("/health")
 def health():
@@ -182,39 +123,54 @@ def health():
 
 @app.post("/signup")
 def signup(user_data: UserRegister):
-    conn = get_db()
-    with conn.cursor() as cur:
-        cur.execute("SELECT id FROM users WHERE username = %s;", (user_data.username,))
-        if cur.fetchone():
-            conn.close()
-            raise HTTPException(status_code=400, detail="Username already exists.")
+    try:
+        supabase = get_supabase()
         
+        # Check if user exists
+        existing_user = supabase.table("users").select("id").eq("username", user_data.username).execute()
+        if existing_user.data:
+            raise HTTPException(status_code=400, detail="Username already exists.")
+
+        # Hash password and insert
         hashed_pwd = get_password_hash(user_data.password)
-        cur.execute(
-            "INSERT INTO users (username, password_hash) VALUES (%s, %s) RETURNING id;",
-            (user_data.username, hashed_pwd)
-        )
-        conn.commit()
-    conn.close()
-    return {"message": "User registered successfully"}
+        res = supabase.table("users").insert({
+            "username": user_data.username,
+            "password_hash": hashed_pwd
+        }).execute()
+
+        return {"message": "User registered successfully"}
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
 @app.post("/login", response_model=Token)
 def login(form_data: OAuth2PasswordRequestForm = Depends()):
-    conn = get_db()
-    with conn.cursor() as cur:
-        cur.execute("SELECT * FROM users WHERE username = %s;", (form_data.username,))
-        user = cur.fetchone()
-    conn.close()
+    try:
+        supabase = get_supabase()
+        res = supabase.table("users").select("*").eq("username", form_data.username).execute()
+        
+        if not res.data:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Incorrect username or password",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        
+        user = res.data[0]
+        if not verify_password(form_data.password, user["password_hash"]):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Incorrect username or password",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
 
-    if not user or not verify_password(form_data.password, user["password_hash"]):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Incorrect username or password",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-
-    access_token = create_access_token(data={"sub": user["username"]})
-    return {"access_token": access_token, "token_type": "bearer", "username": user["username"]}
+        access_token = create_access_token(data={"sub": user["username"]})
+        return {"access_token": access_token, "token_type": "bearer", "username": user["username"]}
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Login failed: {str(e)}")
 
 @app.post("/predict")
 def predict(application: LoanApplication, current_user: dict = Depends(get_current_user)):
@@ -233,26 +189,26 @@ def predict(application: LoanApplication, current_user: dict = Depends(get_curre
         prediction = "Approved" if prediction_code == "Y" else "Rejected"
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        conn = get_db()
-        with conn.cursor() as cur:
-            cur.execute("""
-                INSERT INTO predictions_history (
-                    user_id, applicant_income, coapplicant_income, loan_amount,
-                    loan_amount_term, credit_history, gender, married,
-                    dependents, education, self_employed, property_area,
-                    prediction, probability, timestamp
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                RETURNING id;
-            """, (
-                current_user["id"], application.ApplicantIncome, application.CoapplicantIncome,
-                application.LoanAmount, application.Loan_Amount_Term, application.Credit_History,
-                application.Gender, application.Married, application.Dependents,
-                application.Education, application.Self_Employed, application.Property_Area,
-                prediction, approval_probability, timestamp
-            ))
-            record_id = cur.fetchone()["id"]
-            conn.commit()
-        conn.close()
+        supabase = get_supabase()
+        res = supabase.table("predictions_history").insert({
+            "user_id": current_user["id"],
+            "applicant_income": application.ApplicantIncome,
+            "coapplicant_income": application.CoapplicantIncome,
+            "loan_amount": application.LoanAmount,
+            "loan_amount_term": application.Loan_Amount_Term,
+            "credit_history": application.Credit_History,
+            "gender": application.Gender,
+            "married": application.Married,
+            "dependents": application.Dependents,
+            "education": application.Education,
+            "self_employed": application.Self_Employed,
+            "property_area": application.Property_Area,
+            "prediction": prediction,
+            "probability": approval_probability,
+            "timestamp": timestamp
+        }).execute()
+
+        record_id = res.data[0]["id"] if res.data else None
 
         return {
             "id": record_id,
@@ -267,23 +223,29 @@ def predict(application: LoanApplication, current_user: dict = Depends(get_curre
 @app.get("/history")
 def history(current_user: dict = Depends(get_current_user)):
     try:
-        conn = get_db()
-        with conn.cursor() as cur:
-            cur.execute("""
-                SELECT 
-                    id, applicant_income AS "ApplicantIncome", coapplicant_income AS "CoapplicantIncome",
-                    loan_amount AS "LoanAmount", loan_amount_term AS "Loan_Amount_Term",
-                    credit_history AS "Credit_History", gender AS "Gender", married AS "Married",
-                    dependents AS "Dependents", education AS "Education", self_employed AS "Self_Employed",
-                    property_area AS "Property_Area", prediction AS "Prediction",
-                    probability AS "Approval_Probability", timestamp AS "Timestamp"
-                FROM predictions_history
-                WHERE user_id = %s
-                ORDER BY id DESC;
-            """, (current_user["id"],))
-            rows = cur.fetchall()
-        conn.close()
+        supabase = get_supabase()
+        res = supabase.table("predictions_history").select("*").eq("user_id", current_user["id"]).order("id", desc=True).execute()
 
-        return {"count": len(rows), "records": rows}
+        formatted_records = []
+        for r in res.data:
+            formatted_records.append({
+                "id": r.get("id"),
+                "ApplicantIncome": r.get("applicant_income"),
+                "CoapplicantIncome": r.get("coapplicant_income"),
+                "LoanAmount": r.get("loan_amount"),
+                "Loan_Amount_Term": r.get("loan_amount_term"),
+                "Credit_History": r.get("credit_history"),
+                "Gender": r.get("gender"),
+                "Married": r.get("married"),
+                "Dependents": r.get("dependents"),
+                "Education": r.get("education"),
+                "Self_Employed": r.get("self_employed"),
+                "Property_Area": r.get("property_area"),
+                "Prediction": r.get("prediction"),
+                "Approval_Probability": r.get("probability"),
+                "Timestamp": r.get("timestamp")
+            })
+
+        return {"count": len(formatted_records), "records": formatted_records}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Could not fetch history: {exc}")
