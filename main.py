@@ -5,7 +5,6 @@ Loan Approval Prediction System
 
 import os
 from datetime import datetime, timedelta
-from typing import Optional
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Depends, status
@@ -13,21 +12,24 @@ from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 import joblib
 import pandas as pd
 from pydantic import BaseModel, Field
-import psycopg2
-from psycopg2.extras import RealDictCursor
 from passlib.context import CryptContext
 from jose import JWTError, jwt
+
+# Safe Import for PostgreSQL Driver
+try:
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+except ImportError:
+    psycopg2 = None
+    RealDictCursor = None
 
 BASE_DIR = Path(__file__).resolve().parent
 MODEL_PATH = BASE_DIR / "model.pkl"
 
-# Environment Variable se Supabase Database URL fetch karein
 DATABASE_URL = os.environ.get("DATABASE_URL")
-
-# Security Configurations
 SECRET_KEY = os.environ.get("JWT_SECRET_KEY", "super-secret-key-change-this-in-prod")
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 # 24 Hours
+ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
@@ -71,7 +73,9 @@ class LoanApplication(BaseModel):
 # ---------- Database Helpers ----------
 def get_db():
     if not DATABASE_URL:
-        raise HTTPException(status_code=500, detail="DATABASE_URL is not set in environment variables.")
+        raise HTTPException(status_code=500, detail="DATABASE_URL environment variable is missing.")
+    if psycopg2 is None:
+        raise HTTPException(status_code=500, detail="psycopg2 library is not installed correctly.")
     try:
         conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
         return conn
@@ -79,10 +83,11 @@ def get_db():
         raise HTTPException(status_code=500, detail=f"Database connection error: {e}")
 
 def init_db():
+    if not DATABASE_URL or psycopg2 is None:
+        return
     try:
-        conn = get_db()
+        conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
         with conn.cursor() as cur:
-            # Users Table
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS users (
                     id SERIAL PRIMARY KEY,
@@ -91,7 +96,6 @@ def init_db():
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
             """)
-            # History Table (Linked to User ID)
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS predictions_history (
                     id SERIAL PRIMARY KEY,
@@ -115,7 +119,7 @@ def init_db():
             conn.commit()
         conn.close()
     except Exception as e:
-        print(f"DB Init Exception: {e}")
+        print(f"DB Init Warning: {e}")
 
 @app.on_event("startup")
 def startup():
