@@ -4,7 +4,7 @@ pandas
 scikit-learn
 joblib
 pydantic
-psycopg2-binary
+supabase
 passlib[bcrypt]
 python-jose[cryptography]
 python-multipart
