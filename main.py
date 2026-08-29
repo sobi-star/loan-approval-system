@@ -9,19 +9,21 @@ Responsibilities:
 - Return prediction history through GET /history
 """
 
+from datetime import datetime
 from pathlib import Path
 import sqlite3
-from datetime import datetime
+import tempfile
 
+from fastapi import FastAPI, HTTPException
 import joblib
 import pandas as pd
-from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
-
 
 BASE_DIR = Path(__file__).resolve().parent
 MODEL_PATH = BASE_DIR / "model.pkl"
-DB_PATH = BASE_DIR / "loan_predictions.db"
+
+# Vercel serverless ke liye writable temporary directory
+DB_PATH = Path(tempfile.gettempdir()) / "loan_predictions.db"
 
 app = FastAPI(
     title="Loan Approval Prediction API",
@@ -72,29 +74,32 @@ def get_connection() -> sqlite3.Connection:
 
 def init_database() -> None:
     """Create the prediction history table if it does not exist."""
-    with get_connection() as conn:
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS predictions_history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                applicant_income REAL NOT NULL,
-                coapplicant_income REAL NOT NULL,
-                loan_amount REAL NOT NULL,
-                loan_amount_term INTEGER NOT NULL,
-                credit_history REAL NOT NULL,
-                gender TEXT NOT NULL,
-                married TEXT NOT NULL,
-                dependents TEXT NOT NULL,
-                education TEXT NOT NULL,
-                self_employed TEXT NOT NULL,
-                property_area TEXT NOT NULL,
-                prediction TEXT NOT NULL,
-                probability REAL NOT NULL,
-                timestamp TEXT NOT NULL
+    try:
+        with get_connection() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS predictions_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    applicant_income REAL NOT NULL,
+                    coapplicant_income REAL NOT NULL,
+                    loan_amount REAL NOT NULL,
+                    loan_amount_term INTEGER NOT NULL,
+                    credit_history REAL NOT NULL,
+                    gender TEXT NOT NULL,
+                    married TEXT NOT NULL,
+                    dependents TEXT NOT NULL,
+                    education TEXT NOT NULL,
+                    self_employed TEXT NOT NULL,
+                    property_area TEXT NOT NULL,
+                    prediction TEXT NOT NULL,
+                    probability REAL NOT NULL,
+                    timestamp TEXT NOT NULL
+                )
+                """
             )
-            """
-        )
-        conn.commit()
+            conn.commit()
+    except Exception as exc:
+        print(f"Database init warning: {exc}")
 
 
 @app.on_event("startup")
@@ -144,46 +149,53 @@ def predict(application: LoanApplication):
         prediction = "Approved" if prediction_code == "Y" else "Rejected"
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        with get_connection() as conn:
-            cursor = conn.execute(
-                """
-                INSERT INTO predictions_history (
-                    applicant_income,
-                    coapplicant_income,
-                    loan_amount,
-                    loan_amount_term,
-                    credit_history,
-                    gender,
-                    married,
-                    dependents,
-                    education,
-                    self_employed,
-                    property_area,
-                    prediction,
-                    probability,
-                    timestamp
+        record_id = None
+
+        # Safe DB insertion block (app won't crash if environment is read-only)
+        try:
+            init_database()
+            with get_connection() as conn:
+                cursor = conn.execute(
+                    """
+                    INSERT INTO predictions_history (
+                        applicant_income,
+                        coapplicant_income,
+                        loan_amount,
+                        loan_amount_term,
+                        credit_history,
+                        gender,
+                        married,
+                        dependents,
+                        education,
+                        self_employed,
+                        property_area,
+                        prediction,
+                        probability,
+                        timestamp
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        application.ApplicantIncome,
+                        application.CoapplicantIncome,
+                        application.LoanAmount,
+                        application.Loan_Amount_Term,
+                        application.Credit_History,
+                        application.Gender,
+                        application.Married,
+                        application.Dependents,
+                        application.Education,
+                        application.Self_Employed,
+                        application.Property_Area,
+                        prediction,
+                        approval_probability,
+                        timestamp,
+                    ),
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    application.ApplicantIncome,
-                    application.CoapplicantIncome,
-                    application.LoanAmount,
-                    application.Loan_Amount_Term,
-                    application.Credit_History,
-                    application.Gender,
-                    application.Married,
-                    application.Dependents,
-                    application.Education,
-                    application.Self_Employed,
-                    application.Property_Area,
-                    prediction,
-                    approval_probability,
-                    timestamp,
-                ),
-            )
-            conn.commit()
-            record_id = cursor.lastrowid
+                conn.commit()
+                record_id = cursor.lastrowid
+        except Exception as db_exc:
+            print(f"Skipping database write due to environment restrictions: {db_exc}")
 
         return {
             "id": record_id,
@@ -234,7 +246,7 @@ def history():
         }
 
     except Exception as exc:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Could not fetch history: {exc}",
-        ) from exc
+        return {
+            "count": 0,
+            "records": [],
+        }
